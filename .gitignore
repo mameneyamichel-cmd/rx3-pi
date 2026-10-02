@@ -13,3 +13,5 @@ extracted/
 pi-runtime/
 rbp*
 rx3-rootfs/
+
+config.env

@@ -1,12 +1,25 @@
 #!/bin/sh
 # Stop only RX3 processes; release MIDI/audio/display for the preserved BiteDJ.
 set -eu
-exec 9>/home/pompu_5/.rx3-runtime.lock
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+CONFIG="$SCRIPT_DIR/config.env"
+if [ ! -f "$CONFIG" ]; then
+ echo "Missing $CONFIG; copy config.env.example to config.env and uncomment the settings." >&2
+ exit 1
+fi
+# shellcheck disable=SC1090
+. "$CONFIG"
+: "${RX3_HOME:?}" "${RX3_ROOTFS:?}"
+RX3_HOME=${RX3_HOME%/}
+RX3_ROOTFS=${RX3_ROOTFS%/}
+export RX3_HOME RX3_ROOTFS
+exec 9>"$RX3_HOME/.rx3-runtime.lock"
 flock -x 9
 python3 - <<'PY'
 import os,signal,time
 from pathlib import Path
-home='/home/pompu_5/'
+home=os.environ['RX3_HOME']+'/'
+rootfs=os.environ['RX3_ROOTFS']
 def targets():
  result={'midi':[],'touch':[],'player':[],'display':[]}
  for d in Path('/proc').iterdir():
@@ -17,8 +30,8 @@ def targets():
    if not args:continue
    exe=os.path.basename(args[0])
    if exe=='rbp-pi' and args[0]=='/root/pdj/rbp-pi':kind='player'
-   elif exe=='rx3-fb-present' and len(args)>=2 and args[1]==home+'rx3-rootfs/dev/fb0' and all(a in ('--fullscreen','--coherent') for a in args[2:]):kind='display'
-   elif exe=='rx3-touch-bridge' and len(args)>=3 and args[2]==home+'rx3-rootfs/dev/tsc2007_2-0048' and all(a=='--fullscreen' for a in args[3:]):kind='touch'
+   elif exe=='rx3-fb-present' and len(args)>=2 and args[1]==rootfs+'/dev/fb0' and all(a in ('--fullscreen','--coherent') for a in args[2:]):kind='display'
+   elif exe=='rx3-touch-bridge' and len(args)>=3 and args[2]==rootfs+'/dev/tsc2007_2-0048' and all(a=='--fullscreen' for a in args[3:]):kind='touch'
    elif exe=='python3' and len(args)==2 and args[1] in ('flx6-rx3.py',home+'flx6-rx3.py'):kind='midi'
    else:continue
    result[kind].append(int(d.name))
