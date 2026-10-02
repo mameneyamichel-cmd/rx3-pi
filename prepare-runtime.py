@@ -1,17 +1,67 @@
 #!/usr/bin/env python3
 """Restore mounts for this Pi's existing RX3 rootfs; never assemble/replace it.
 
-Run as pompu_5. --check only inspects. Mount operations use sudo -n.
-The original USB export remains read-only; local USB2 database/analysis persist.
+Run as the host user that owns the rootfs. --check only inspects. Mount
+operations use sudo -n. The original USB export remains read-only; local USB2
+database/analysis persist.
+
+Settings (see config.env.example). A real environment variable wins over the
+file. The file is $RX3_CONFIG if set, otherwise config.env beside this script:
+  RX3_ROOTFS    absolute path of the prepared rootfs; if unset, RX3_HOME is
+                used and the rootfs defaults to $RX3_HOME/rx3-rootfs
+  RX3_USB_UUID  filesystem UUID of the USB drive (required)
+  RX3_USB_UID, RX3_USB_GID   owner of the USB mount (default 1000 and 1000)
+The USB mount uses vfat options; another filesystem needs different handling.
 """
 import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 
-ROOT = Path('/home/pompu_5/rx3-rootfs')
-USB_UUID = '0FFF-3865'
+
+def parse_env_file(path):
+    """Read simple KEY=value lines (shell style, optional quotes, $VAR)."""
+    values = {}
+    for raw in path.read_text(encoding='utf-8').splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('export '):
+            line = line[len('export '):].lstrip()
+        key, sep, value = line.partition('=')
+        key, value = key.strip(), value.strip()
+        if not sep or not key.isidentifier():
+            continue
+        if len(value) >= 2 and value[0] in '"\'' and value[-1] == value[0]:
+            value = value[1:-1]
+        else:
+            value = value.split(' #', 1)[0].strip()
+        known = {**os.environ, **values}
+        values[key] = re.sub(
+            r'\$\{(\w+)\}|\$(\w+)',
+            lambda m: known.get(m.group(1) or m.group(2), m.group(0)),
+            value,
+        )
+    return values
+
+
+def load_settings():
+    """Return setting(name, default): environment first, then config.env."""
+    here = Path(__file__).absolute()
+    values = {}
+    explicit = os.environ.get('RX3_CONFIG')
+    if explicit:
+        if not Path(explicit).is_file():
+            raise SystemExit(f'RX3_CONFIG file not found: {explicit}')
+        values = parse_env_file(Path(explicit))
+    else:
+        for path in (here.parent / 'config.env', here.resolve().parent / 'config.env'):
+            if path.is_file():
+                values = parse_env_file(path)
+                break
+    return lambda name, default=None: os.environ.get(name, values.get(name, default))
 
 
 def command(*args):
@@ -61,21 +111,41 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true', help='Inspect without changing mounts or files')
     args = parser.parse_args()
+
+    setting = load_settings()
+    rootfs = setting('RX3_ROOTFS')
+    if not rootfs and setting('RX3_HOME'):
+        rootfs = str(Path(setting('RX3_HOME')) / 'rx3-rootfs')
+    usb_uuid = setting('RX3_USB_UUID')
+    usb_uid = setting('RX3_USB_UID', '1000')
+    usb_gid = setting('RX3_USB_GID', '1000')
+    problems = []
+    if not rootfs:
+        problems.append('RX3_ROOTFS (or RX3_HOME) is not set')
+    if not usb_uuid:
+        problems.append('RX3_USB_UUID is not set')
+    if not (usb_uid.isdigit() and usb_gid.isdigit()):
+        problems.append('RX3_USB_UID and RX3_USB_GID must be numbers')
+    if problems:
+        raise SystemExit('Invalid settings: ' + '; '.join(problems)
+                         + '. Copy config.env.example to config.env and fill it in.')
+
+    root = Path(rootfs)
     errors = []
     for name in ['root/pdj/rbp-pi', 'lib/fbshim.so', 'bin/busybox', 'etc/asound.conf']:
-        if not (ROOT / name).is_file():
-            errors.append(f'Missing existing runtime file: {ROOT / name}')
+        if not (root / name).is_file():
+            errors.append(f'Missing existing runtime file: {root / name}')
     if errors:
         raise SystemExit('\n'.join(errors))
     for name in ['null', 'zero', 'urandom', 'full', 'snd']:
-        bind(Path('/dev') / name, ROOT / 'dev' / name, False, args.check, errors)
+        bind(Path('/dev') / name, root / 'dev' / name, False, args.check, errors)
     # Preserve the firmware-specific fake /proc files; mount only ALSA's subtree.
-    bind('/proc/asound', ROOT / 'proc/asound', False, args.check, errors)
-    usb = ROOT / 'media/usb1/sda1'
-    device = Path('/dev/disk/by-uuid') / USB_UUID
+    bind('/proc/asound', root / 'proc/asound', False, args.check, errors)
+    usb = root / 'media/usb1/sda1'
+    device = Path('/dev/disk/by-uuid') / usb_uuid
     if mounted(usb):
         actual = subprocess.check_output(['findmnt', '-n', '-o', 'UUID', '-M', str(usb)], text=True).strip()
-        if actual != USB_UUID:
+        if actual != usb_uuid:
             errors.append(f'Unexpected USB filesystem at {usb}; left unchanged')
             device = None
         else:
@@ -88,9 +158,9 @@ def main():
             errors.append(f'Missing USB1 mount: {usb}')
             device = None
         else:
-            existing = subprocess.run(['findmnt', '-J', '-o', 'TARGET,FSROOT,OPTIONS', '-S', 'UUID=' + USB_UUID], capture_output=True, text=True)
+            existing = subprocess.run(['findmnt', '-J', '-o', 'TARGET,FSROOT,OPTIONS', '-S', 'UUID=' + usb_uuid], capture_output=True, text=True)
             roots = json.loads(existing.stdout).get('filesystems', []) if existing.returncode == 0 else []
-            roots = [r for r in roots if r.get('fsroot') == '/' and not Path(r['target']).is_relative_to(ROOT)]
+            roots = [r for r in roots if r.get('fsroot') == '/' and not Path(r['target']).is_relative_to(root)]
             if roots:
                 host = roots[0]
                 options = host['options'].split(',')
@@ -101,16 +171,16 @@ def main():
                     bind(host['target'], usb, True, False, errors)
             else:
                 usb.mkdir(parents=True, exist_ok=True)
-                command('sudo', '-n', 'mount', '-t', 'vfat', '-o', 'ro,uid=1000,gid=1000,utf8=1,nosuid,nodev,noexec', str(device), str(usb))
+                command('sudo', '-n', 'mount', '-t', 'vfat', '-o', f'ro,uid={usb_uid},gid={usb_gid},utf8=1,nosuid,nodev,noexec', str(device), str(usb))
     else:
-        print(f'USB {USB_UUID} absent; player can start without media.')
+        print(f'USB {usb_uuid} absent; player can start without media.')
         device = None
     if device is not None and mounted(usb):
         for part in ['Contents', 'Music', 'PIONEER/Artwork']:
             if (usb / part).is_dir():
-                bind(usb / part, ROOT / 'media/usb2/sdb1' / part, True, args.check, errors)
+                bind(usb / part, root / 'media/usb2/sdb1' / part, True, args.check, errors)
         for part in ['PIONEER/rekordbox', 'PIONEER/USBANLZ']:
-            if not (ROOT / 'media/usb2/sdb1' / part).is_dir():
+            if not (root / 'media/usb2/sdb1' / part).is_dir():
                 errors.append(f'Missing prepared local library: {part}; run prepare-library-view.sh')
     if errors:
         raise SystemExit('\n'.join(errors))
