@@ -4,6 +4,7 @@ Input only; hot-cue, beat-loop and default beat-jump banks supported. LED feedba
 """
 import argparse, ctypes, errno, json, os, re, signal, struct, subprocess, time
 import xml.etree.ElementTree as ET
+from rx3config import load_settings
 BUTTONS={'play':0x4101,'cue_default':0x4102,'loop_in':0x410c,'loop_out':0x410d,
  'reloop_toggle':0x410e,'slip_enabled':0x4110,'sync_enabled':0x4112,'sync_leader':0x4111,
  'keylock':0x4108,'PioneerDDJFLX6.cycleTempoRange':0x4107,'quantize':0x410b,'pfl':0x5020,'LoadSelectedTrack':0x4311,
@@ -196,17 +197,21 @@ def listen_reconnecting(b,lib,running,discover,sleep=time.sleep):
    if not running():break
    sleep(.05)
 def main():
- p=argparse.ArgumentParser();p.add_argument('--mapping',default='/home/pompu_5/.mixxx/controllers/Pioneer-DDJ-FLX6.midi.xml');p.add_argument('--fifo',default='/home/pompu_5/rx3-rootfs/dev/rx3-control');p.add_argument('--replay');p.add_argument('--dry-run',action='store_true');a=p.parse_args()
+ setting=load_settings()
+ home=setting('RX3_HOME') or os.path.expanduser('~')
+ rootfs=setting('RX3_ROOTFS') or os.path.join(home,'rx3-rootfs')
+ p=argparse.ArgumentParser();p.add_argument('--mapping',default=setting('RX3_MIDI_MAPPING') or os.path.join(home,'.mixxx/controllers/Pioneer-DDJ-FLX6.midi.xml'));p.add_argument('--fifo',default=os.path.join(rootfs,'dev/rx3-control'));p.add_argument('--replay');p.add_argument('--dry-run',action='store_true');a=p.parse_args()
  fd=None if a.dry_run else os.open(a.fifo,os.O_WRONLY|os.O_NONBLOCK)
  def emit(*cmd):
   if fd is not None:os.write(fd,struct.pack('<iiiifi',*cmd))
   if a.replay or a.dry_run:print(cmd,flush=True)
+  if not os.path.isfile(a.mapping):raise SystemExit(f'MIDI mapping not found: {a.mapping}. Set RX3_MIDI_MAPPING in config.env.')
  b=Bridge(a.mapping,emit);print(f'Loaded {len(b.mapping)} MIDI bindings from {a.mapping}',flush=True)
  if a.replay:
   b.feed(open(a.replay,'rb').read());b.release();return
  # Preserve absolute jog counters across MIDI-reader restarts in this player session.
  player=subprocess.check_output(['pgrep','-x','rbp-pi'],text=True).strip()
- statefile='/home/pompu_5/rx3-midi-jog-state.json'
+ statefile=os.path.join(home,'rx3-midi-jog-state.json')
  try:
   previous=json.load(open(statefile))
   if previous.get('player')==player:

@@ -15,3 +15,5 @@ rbp*
 rx3-rootfs/
 
 config.env
+rx3-midi.log
+rx3-midi-jog-state.json
